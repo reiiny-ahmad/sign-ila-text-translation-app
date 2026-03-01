@@ -11,14 +11,15 @@ import {
 } from "lucide-react";
 
 const TIMING_OPTIONS = [2, 3, 4, 5];
-
-// Simulated detection for demo purposes (replace with actual API call to your Flask backend)
-const ASL_LETTERS = "abcdefghijklmnopqrstuvwxyz".split("");
+const PREDICT_INTERVAL_MS = 900;
+const PREDICT_ENDPOINT = "/api/predict";
 
 export default function TranslatorSection() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const inFlightRef = useRef(false);
 
   const [cameraOn, setCameraOn] = useState(false);
   const [confirmTime, setConfirmTime] = useState(3);
@@ -37,6 +38,90 @@ export default function TranslatorSection() {
     confirmTimeRef.current = confirmTime;
   }, [confirmTime]);
 
+  const handleDetection = useCallback((letter: string) => {
+    if (letter === currentLetterRef.current) {
+      countdownRef.current += 1;
+      setCountdown(countdownRef.current);
+      if (countdownRef.current >= confirmTimeRef.current) {
+        setTranslatedText((prev) => prev + letter);
+        countdownRef.current = 0;
+        setCountdown(0);
+      }
+    } else {
+      currentLetterRef.current = letter;
+      setCurrentLetter(letter);
+      countdownRef.current = 1;
+      setCountdown(1);
+    }
+    setIsConnected(true);
+  }, []);
+
+  const captureCurrentFrame = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
+      return null;
+    }
+
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement("canvas");
+    }
+
+    const canvas = canvasRef.current;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return null;
+    }
+
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.8);
+  }, []);
+
+  const requestPrediction = useCallback(async () => {
+    if (!streamRef.current || inFlightRef.current) {
+      return;
+    }
+
+    const image = captureCurrentFrame();
+    if (!image) {
+      return;
+    }
+
+    inFlightRef.current = true;
+    try {
+      const response = await fetch(PREDICT_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = (await response.json()) as {
+        letter?: string | null;
+      };
+
+      if (data.letter) {
+        handleDetection(data.letter.toLowerCase());
+      }
+
+      setError(null);
+      setIsConnected(true);
+    } catch {
+      setIsConnected(false);
+      setError((prev) =>
+        prev ??
+        "Impossible de contacter le backend IA (localhost:8000). Lance d'abord l'API FastAPI."
+      );
+    } finally {
+      inFlightRef.current = false;
+    }
+  }, [captureCurrentFrame, handleDetection]);
+
   const startCamera = useCallback(async () => {
     try {
       setError(null);
@@ -48,19 +133,19 @@ export default function TranslatorSection() {
         videoRef.current.srcObject = stream;
       }
       setCameraOn(true);
+      setIsConnected(false);
 
-      // Simulate detection every second (in production, send frames to your Flask API)
       intervalRef.current = setInterval(() => {
-        const randomLetter =
-          ASL_LETTERS[Math.floor(Math.random() * ASL_LETTERS.length)];
-        handleDetection(randomLetter);
-      }, 1000);
+        void requestPrediction();
+      }, PREDICT_INTERVAL_MS);
+
+      void requestPrediction();
     } catch {
       setError(
         "Impossible d'accéder à la caméra. Vérifiez les permissions."
       );
     }
-  }, []);
+  }, [requestPrediction]);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -80,24 +165,7 @@ export default function TranslatorSection() {
     setIsConnected(false);
     countdownRef.current = 0;
     currentLetterRef.current = null;
-  }, []);
-
-  const handleDetection = useCallback((letter: string) => {
-    if (letter === currentLetterRef.current) {
-      countdownRef.current += 1;
-      setCountdown(countdownRef.current);
-      if (countdownRef.current >= confirmTimeRef.current) {
-        setTranslatedText((prev) => prev + letter);
-        countdownRef.current = 0;
-        setCountdown(0);
-      }
-    } else {
-      currentLetterRef.current = letter;
-      setCurrentLetter(letter);
-      countdownRef.current = 1;
-      setCountdown(1);
-    }
-    setIsConnected(true);
+    inFlightRef.current = false;
   }, []);
 
   useEffect(() => {
@@ -346,13 +414,16 @@ export default function TranslatorSection() {
         {/* Info note */}
         <div className="mt-8 text-center">
           <p className="text-xs text-gray-600 max-w-lg mx-auto">
-            💡 <strong className="text-gray-500">Mode démo :</strong> Les
-            lettres sont simulées aléatoirement. Connectez votre backend Flask
-            avec le modèle <code className="text-[#E94560]">model_sign_language.p</code> pour
-            la détection réelle.
+            <strong className="text-gray-500">
+              {isConnected ? "Backend connecte :" : "Backend non connecte :"}
+            </strong>{" "}
+            {isConnected
+              ? "detection IA en temps reel activee."
+              : "lance FastAPI sur localhost:8000 avec model_sign_language.p."}
           </p>
         </div>
       </div>
     </section>
   );
 }
+

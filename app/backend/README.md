@@ -3,6 +3,7 @@
 Ce backend charge `model_sign_language.p` et expose l'endpoint d'inférence:
 
 - `POST /api/predict`
+- `POST /api/hands` (positions de 2 mains pour mode interaction)
 
 ## 1) Installation
 

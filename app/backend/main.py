@@ -35,7 +35,7 @@ app.add_middleware(
 hands = (
     mp_hands.Hands(
         static_image_mode=True,
-        max_num_hands=1,
+        max_num_hands=2,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5,
     )
@@ -56,6 +56,17 @@ class PredictResponse(BaseModel):
     raw_label: str | None = None
     confidence: float | None = None
     error: str | None = None
+
+
+class HandPoint(BaseModel):
+    x: float
+    y: float
+    handedness: str | None = None
+    pinch: bool = False
+
+
+class HandsResponse(BaseModel):
+    hands: list[HandPoint]
 
 
 def _load_model(model_path: Path) -> tuple[Any, Any]:
@@ -120,6 +131,38 @@ def _extract_features(frame: np.ndarray) -> np.ndarray | None:
     return feature_vector
 
 
+def _extract_hand_points(frame: np.ndarray) -> list[HandPoint]:
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(rgb)
+
+    if not results.multi_hand_landmarks:
+        return []
+
+    handedness_labels: list[str | None] = []
+    if results.multi_handedness:
+        for hand_info in results.multi_handedness:
+            if hand_info.classification:
+                handedness_labels.append(hand_info.classification[0].label)
+            else:
+                handedness_labels.append(None)
+
+    hand_points: list[HandPoint] = []
+    for idx, hand_landmarks in enumerate(results.multi_hand_landmarks[:2]):
+        index_tip = hand_landmarks.landmark[8]
+        thumb_tip = hand_landmarks.landmark[4]
+        pinch_distance = float(np.hypot(index_tip.x - thumb_tip.x, index_tip.y - thumb_tip.y))
+        hand_points.append(
+            HandPoint(
+                x=float(index_tip.x),
+                y=float(index_tip.y),
+                handedness=handedness_labels[idx] if idx < len(handedness_labels) else None,
+                pinch=pinch_distance < 0.06,
+            )
+        )
+
+    return hand_points
+
+
 def _to_letter(raw_label: Any) -> str:
     label = str(raw_label).strip()
 
@@ -152,7 +195,8 @@ def startup_event() -> None:
 
 @app.on_event("shutdown")
 def shutdown_event() -> None:
-    hands.close()
+    if hands is not None:
+        hands.close()
 
 
 @app.get("/api/health")
@@ -192,3 +236,10 @@ def predict(payload: PredictRequest) -> PredictResponse:
         raw_label=str(raw_label),
         confidence=confidence,
     )
+
+
+@app.post("/api/hands", response_model=HandsResponse)
+def get_hands(payload: PredictRequest) -> HandsResponse:
+    frame = _decode_image(payload.image)
+    hand_points = _extract_hand_points(frame)
+    return HandsResponse(hands=hand_points)
